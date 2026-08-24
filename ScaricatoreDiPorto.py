@@ -9,6 +9,44 @@ if getattr(sys, 'frozen', False):
 else:
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
+# --- LOGGING DUAL STREAM (Console + File in ambiente di sviluppo) ---
+if not getattr(sys, 'frozen', False):
+    log_file_path = os.path.join(base_dir, "app_debug.log")
+    try:
+        with open(log_file_path, "w", encoding="utf-8") as f:
+            f.write("=== LOG AVVIO APPLICAZIONE ===\n")
+    except Exception:
+        pass
+
+    class DualLogger:
+        def __init__(self, stream, filepath):
+            self.stream = stream
+            self.filepath = filepath
+        def write(self, message):
+            if self.stream:
+                try:
+                    self.stream.write(message)
+                    self.stream.flush()
+                except Exception:
+                    pass
+            try:
+                with open(self.filepath, "a", encoding="utf-8") as f:
+                    f.write(message)
+                    f.flush()
+            except Exception:
+                pass
+        def flush(self):
+            if self.stream:
+                try:
+                    self.stream.flush()
+                except Exception:
+                    pass
+
+    if sys.stdout:
+        sys.stdout = DualLogger(sys.stdout, log_file_path)
+    if sys.stderr:
+        sys.stderr = DualLogger(sys.stderr, log_file_path)
+
 # --- 2. IL TRUCCO MAGICO ANTI-403 ---
 # Inseriamo il file zip scaricato in CIMA ai percorsi di Python. 
 # Questo forza il programma a ignorare la versione di yt-dlp dentro _internal.
@@ -46,6 +84,11 @@ icona_dir = os.path.join(base_dir, "images", "icona64.ico")
 
 # Percorso di default ffmpeg (adatta il percorso se in _internal è posizionato diversamente)
 default_ffmpeg_path = os.path.join(base_dir, "ffmpeg-master-latest-win64-gpl-shared", "bin")
+
+# Assicura che base_dir e .venv\Scripts siano nel PATH per trovare deno.exe ed ffmpeg
+for extra_p in [base_dir, os.path.join(base_dir, ".venv", "Scripts")]:
+    if os.path.exists(extra_p) and extra_p not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = extra_p + os.pathsep + os.environ.get("PATH", "")
 
 def get_system_theme():
     if sys.platform == "win32":
@@ -118,7 +161,7 @@ VOSK_MODELS = {
 class App(customtkinter.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Scaricatore di porto 2.3 - The Ganzest")
+        self.title("Scaricatore di porto 2.5 - The Ganzest")
         if os.path.exists(icona_dir): self.iconbitmap(icona_dir)
         self.geometry("450x600")
         self.minsize(400, 600)
@@ -519,11 +562,24 @@ def auto_play(percorso):
     except Exception: pass
 
 def get_base_ydl_opts(job_data=None):
-    """Crea le opzioni base incluse quelle dei Cookie se richiesti"""
-    opts = {}
+    """Crea le opzioni base incluse quelle dei Cookie ed extractor_args con Deno"""
+    deno_exe = os.path.join(base_dir, "deno.exe")
+    opts = {
+        'js_runtimes': {'deno': {'path': deno_exe} if os.path.exists(deno_exe) else {}},
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web_embedded', 'web', 'tv']
+            }
+        }
+    }
     if job_data and job_data.get('browser_cookies') and job_data['browser_cookies'] != "None":
         opts['cookiesfrombrowser'] = (job_data['browser_cookies'],)
     return opts
+
+def extract_clean_resolutions(formats):
+    if not formats: return []
+    resolutions = {f['height'] for f in formats if f.get('height') and f.get('vcodec') != 'none' and f['height'] >= 144}
+    return [f"{r}p" for r in sorted(resolutions, reverse=True)]
 
 def submit(url_string, app_instance, job_data):
     video_data_for_ui = None
@@ -543,8 +599,12 @@ def submit(url_string, app_instance, job_data):
                 
         formats = info_dict.get('formats', None)
         if formats:
-            resolutions = {f['height'] for f in formats if f.get('height') and f['height'] >= 144}
-            video_data_for_ui = {"resolutions": [f"{r}p" for r in sorted(resolutions, reverse=True)]}
+            clean_res_list = extract_clean_resolutions(formats)
+            if clean_res_list:
+                video_data_for_ui = {"resolutions": clean_res_list}
+            else:
+                resolutions = {f['height'] for f in formats if f.get('height') and f['height'] >= 144}
+                video_data_for_ui = {"resolutions": [f"{r}p" for r in sorted(resolutions, reverse=True)]}
     except Exception as e:
         print(f"Errore nel thread di submit: {e}")
     app_instance.after(0, lambda: app_instance.update_resolutions_ui(video_data_for_ui))
@@ -595,9 +655,13 @@ def download_completo(app_instance, job_data):
 
         # Ottimizzazione outtmpl per prevenire path roots
         nome_pulito = re.sub('[^a-zA-Z0-9_. -]', '-', info_dict.get('title', 'video'))
+        res_match = re.search(r'\d+', str(resolution)) if resolution else None
+        res_num = res_match.group(0) if res_match else "1080"
+        format_selector = f'bestvideo[height={res_num}]+bestaudio/bestvideo[height<={res_num}]+bestaudio/best[height<={res_num}]/best'
+
         ydl_opts = {
             'outtmpl': f"{percorso}/{nome_pulito}.%(ext)s",
-            'format': f'bestvideo[height<={resolution}]+bestaudio/best[height<={resolution}]',
+            'format': format_selector,
             'progress_hooks': [progress_hook],
             'ffmpeg_location': ffmpeg_used,
             'merge_output_format': 'mp4' 

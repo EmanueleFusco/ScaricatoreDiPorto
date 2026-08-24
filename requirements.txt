@@ -51,3 +51,4 @@ vosk
 websockets
 WMI
 yt-dlp
+yt-dlp-ejs
