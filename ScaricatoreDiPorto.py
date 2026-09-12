@@ -1,55 +1,15 @@
 import sys
 import os
 
-# --- 1. SETUP DEI PERCORSI PER LA STRUTTURA CON _internal ---
-# Se l'app è compilata con PyInstaller, sys.executable punta al file .exe
-# Usiamo la cartella dove si trova l'exe per salvare le configurazioni e gli aggiornamenti
+# --- Path setup for standalone and development environments ---
+# When packaged with PyInstaller, sys.executable points to the .exe binary.
+# Use the executable directory to store configuration and updates.
 if getattr(sys, 'frozen', False):
     base_dir = os.path.dirname(sys.executable)
 else:
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
-# --- LOGGING DUAL STREAM (Console + File in ambiente di sviluppo) ---
-if not getattr(sys, 'frozen', False):
-    log_file_path = os.path.join(base_dir, "app_debug.log")
-    try:
-        with open(log_file_path, "w", encoding="utf-8") as f:
-            f.write("=== LOG AVVIO APPLICAZIONE ===\n")
-    except Exception:
-        pass
-
-    class DualLogger:
-        def __init__(self, stream, filepath):
-            self.stream = stream
-            self.filepath = filepath
-        def write(self, message):
-            if self.stream:
-                try:
-                    self.stream.write(message)
-                    self.stream.flush()
-                except Exception:
-                    pass
-            try:
-                with open(self.filepath, "a", encoding="utf-8") as f:
-                    f.write(message)
-                    f.flush()
-            except Exception:
-                pass
-        def flush(self):
-            if self.stream:
-                try:
-                    self.stream.flush()
-                except Exception:
-                    pass
-
-    if sys.stdout:
-        sys.stdout = DualLogger(sys.stdout, log_file_path)
-    if sys.stderr:
-        sys.stderr = DualLogger(sys.stderr, log_file_path)
-
-# --- 2. IL TRUCCO MAGICO ANTI-403 ---
-# Inseriamo il file zip scaricato in CIMA ai percorsi di Python. 
-# Questo forza il programma a ignorare la versione di yt-dlp dentro _internal.
+# --- Load dynamic yt-dlp update package if present ---
 yt_dlp_update_path = os.path.join(base_dir, "yt_dlp_update.zip")
 if os.path.exists(yt_dlp_update_path):
     sys.path.insert(0, yt_dlp_update_path)
@@ -73,22 +33,12 @@ import uuid
 from vosk import Model, KaldiRecognizer
 from google import genai
 
-print("--- DIAGNOSTICA AMBIENTE ---")
-print("Python Executable:", sys.executable)
-print("Versione yt-dlp in uso:", yt_dlp.version.__version__)
-print("Cartella base:", base_dir)
-print("--------------------------")
-
-original_path = os.environ.get("PATH", "")
 icona_dir = os.path.join(base_dir, "images", "icona64.ico")
+default_ffmpeg_path = ""
 
-# Percorso di default ffmpeg (adatta il percorso se in _internal è posizionato diversamente)
-default_ffmpeg_path = os.path.join(base_dir, "ffmpeg-master-latest-win64-gpl-shared", "bin")
-
-# Assicura che base_dir e .venv\Scripts siano nel PATH per trovare deno.exe ed ffmpeg
-for extra_p in [base_dir, os.path.join(base_dir, ".venv", "Scripts")]:
-    if os.path.exists(extra_p) and extra_p not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = extra_p + os.pathsep + os.environ.get("PATH", "")
+# Ensure base_dir is in PATH (to locate deno.exe or local binaries)
+if base_dir not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = base_dir + os.pathsep + os.environ.get("PATH", "")
 
 def get_system_theme():
     if sys.platform == "win32":
@@ -110,7 +60,7 @@ def load_config():
         "custom_ffmpeg_enabled": False,
         "custom_ffmpeg_path": default_ffmpeg_path,
         "gemini_api_key": "",
-        "browser_cookies": "None" # Nuova impostazione per i Cookie
+        "browser_cookies": "None"
     }
     try:
         with open(config_path, "r") as file:
@@ -124,7 +74,7 @@ config = load_config()
 customtkinter.set_default_color_theme("dark-blue")
 customtkinter.set_appearance_mode(config["appearance_mode"] if config["appearance_mode"] != "system" else get_system_theme())
 
-if shutil.which("ffmpeg") is None:
+if shutil.which("ffmpeg") is None and default_ffmpeg_path:
     os.environ["PATH"] += os.pathsep + default_ffmpeg_path
 
 def detect_gpu_vendor_wmi():
@@ -179,7 +129,7 @@ class App(customtkinter.CTk):
         self.tabview.add("Advanced")
         self.tabview.add("Settings")
         
-        # --- Scheda DOWNLOAD ---
+        # --- Download Tab ---
         self.download_tab = self.tabview.tab("Download")
         self.download_tab.grid_columnconfigure(0, weight=1)
         self.download_tab.grid_columnconfigure(1, weight=1)
@@ -194,7 +144,7 @@ class App(customtkinter.CTk):
 
         self.debounce_job = None
         self.url_text.trace_add("write", self.on_url_change)
-        self.url_cache = {} # Info cache per evitare spam 403 API
+        self.url_cache = {}  # Metadata cache to avoid redundant network queries
 
         self.dir_frame = customtkinter.CTkFrame(self.download_tab, fg_color="transparent")
         self.dir_frame.grid(row=3, column=0, columnspan=2, pady=10, padx=20, sticky="ew")
@@ -242,7 +192,7 @@ class App(customtkinter.CTk):
         self.progress_bar.set(0)
         self.progress_bar.grid(row=9, column=0, columnspan=2, pady=10, padx=20, sticky="ew")
         
-        # --- Scheda ADVANCED ---
+        # --- Advanced Tab ---
         self.advanced_tab = self.tabview.tab("Advanced")
         self.advanced_tab.grid_columnconfigure(0, weight=1)
         
@@ -313,13 +263,13 @@ class App(customtkinter.CTk):
         self.gemini_language_combo.grid(row=1, column=1, sticky="ew", pady=(5,0))
         self.on_transcribe_change() 
 
-        # --- Scheda SETTINGS ---
+        # --- Settings Tab ---
         self.settings_tab = self.tabview.tab("Settings")
         self.settings_tab.grid_columnconfigure(0, weight=1)
         self.settings_tab.grid_columnconfigure(1, weight=1)
         
-        # --- NOVITÀ: Browser Cookies (Fix 403 aggiuntivo) ---
-        self.browser_cookies_label = customtkinter.CTkLabel(self.settings_tab, text="Browser Cookies (Fix 403):", font=my_font)
+        # --- Browser Cookies ---
+        self.browser_cookies_label = customtkinter.CTkLabel(self.settings_tab, text="Browser Cookies:", font=my_font)
         self.browser_cookies_label.grid(row=0, column=0, padx=10, pady=(15,5), sticky="w")
         self.browser_cookies_combo = customtkinter.CTkComboBox(self.settings_tab, font=my_font, values=["None", "chrome", "edge", "firefox", "brave", "opera", "safari"])
         self.browser_cookies_combo.set(config.get("browser_cookies", "None"))
@@ -350,7 +300,7 @@ class App(customtkinter.CTk):
         self.save_settings_button = customtkinter.CTkButton(self.settings_tab, text="Save Settings", font=my_font, command=self.save_settings)
         self.save_settings_button.grid(row=6, column=0, columnspan=2, padx=10, pady=(15, 5))
 
-        # --- NOVITÀ: Pulsante Download Dinamico yt-dlp ---
+        # --- yt-dlp Update Button ---
         self.update_ytdlp_button = customtkinter.CTkButton(
             self.settings_tab, 
             text="Aggiorna yt-dlp (Risolvi Errori Download)", 
@@ -364,13 +314,13 @@ class App(customtkinter.CTk):
         self.save_confirm_label.grid(row=8, column=0, columnspan=2, padx=10, pady=5)
 
     def update_ytdlp(self):
-        """Scarica e salva il file zipapp di yt-dlp per by-passare la versione di PyInstaller"""
+        """Download and save the official yt-dlp zipapp package to override bundled version."""
         def update_task():
             try:
                 self.trigger_ui_update(error_text="")
                 self.after(0, lambda: self.save_confirm_label.configure(text="Scaricamento aggiornamento... attendi", text_color="orange"))
                 
-                # Link al pacchetto python ufficiale di yt-dlp
+                # Official yt-dlp standalone python package URL
                 url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
                 zip_path = os.path.join(base_dir, "yt_dlp_update.zip")
                 tmp_path = zip_path + ".tmp"
@@ -385,7 +335,7 @@ class App(customtkinter.CTk):
                 
         threading.Thread(target=update_task).start()
 
-    # --- MENU CONTESTUALE ---
+    # --- Context Menu ---
     def setup_context_menu(self):
         self.context_menu = tk.Menu(self, tearoff=False, bg="#2b2b2b", fg="white", activebackground="#1f538d", borderwidth=0)
         self.context_menu.add_command(label="Taglia", command=self.cmd_cut)
@@ -417,7 +367,7 @@ class App(customtkinter.CTk):
         w = self.focus_get()
         if w: w.select_range(0, 'end'); w.icursor('end')
 
-    # --- METODI UI ---
+    # --- UI Helper Methods ---
     def thread_safe_update(self, left_text=None, right_text=None, progress=None, state=None, error_text=None):
         if left_text is not None: self.download_label.configure(text=left_text)
         if right_text is not None: self.speed_label.configure(text=right_text)
@@ -456,7 +406,7 @@ class App(customtkinter.CTk):
             self.download_button.configure(state='normal')
             self.error_label.configure(text="")
         else:
-            self.error_label.configure(text="Error: Could not load video info (403?).")
+            self.error_label.configure(text="Error: Could not load video info.")
             self.combo.configure(values=["Select Resolution"], state="normal")
             self.combo.set("Select Resolution")
             self.download_button.configure(state='disabled')
@@ -513,7 +463,7 @@ class App(customtkinter.CTk):
             'audio_codec_selection': self.encode_audio_box.get(),
             'trim_start': self.trim_start.get(), 'trim_end': self.trim_end.get(),
             'ffmpeg_used': self.get_ffmpeg_exe(),
-            'browser_cookies': self.browser_cookies_combo.get() # Passaggio cookie ai thread
+            'browser_cookies': self.browser_cookies_combo.get()
         }
 
         if self.audio_var.get(): threading.Thread(target=download_audio, args=(self, job_data)).start()
@@ -562,7 +512,7 @@ def auto_play(percorso):
     except Exception: pass
 
 def get_base_ydl_opts(job_data=None):
-    """Crea le opzioni base incluse quelle dei Cookie ed extractor_args con Deno"""
+    """Build base yt-dlp options including browser cookies and Deno JavaScript runtime."""
     deno_exe = os.path.join(base_dir, "deno.exe")
     opts = {
         'js_runtimes': {'deno': {'path': deno_exe} if os.path.exists(deno_exe) else {}},
@@ -605,8 +555,8 @@ def submit(url_string, app_instance, job_data):
             else:
                 resolutions = {f['height'] for f in formats if f.get('height') and f['height'] >= 144}
                 video_data_for_ui = {"resolutions": [f"{r}p" for r in sorted(resolutions, reverse=True)]}
-    except Exception as e:
-        print(f"Errore nel thread di submit: {e}")
+    except Exception:
+        pass
     app_instance.after(0, lambda: app_instance.update_resolutions_ui(video_data_for_ui))
 
 def download_completo(app_instance, job_data):
@@ -645,7 +595,6 @@ def download_completo(app_instance, job_data):
             elif d['status'] == 'error':
                 app_instance.trigger_ui_update(error_text="Download failed!", state='normal')
             elif d['status'] == 'finished':
-                # Risoluzione predittiva per la terminazione di yt-dlp file processing
                 if 'info_dict' in d and '_filename' in d['info_dict']:
                     base_n, _ = os.path.splitext(d['info_dict']['_filename'])
                 else:
@@ -653,7 +602,6 @@ def download_completo(app_instance, job_data):
                 file_info['path'] = base_n + ".mp4" if base_n else None
                 app_instance.trigger_ui_update("Download completed!", "", 1.0, 'normal')
 
-        # Ottimizzazione outtmpl per prevenire path roots
         nome_pulito = re.sub('[^a-zA-Z0-9_. -]', '-', info_dict.get('title', 'video'))
         res_match = re.search(r'\d+', str(resolution)) if resolution else None
         res_num = res_match.group(0) if res_match else "1080"
@@ -678,7 +626,7 @@ def download_completo(app_instance, job_data):
         if job_data['encode']: title = encode_video(title, job_data, app_instance, total_duration)
         if job_data['play']: auto_play(title)
 
-        # --- SEZIONE TRASCRIZIONE ---
+        # --- Transcription Section ---
         if job_data['transcribe']:
             engine = job_data['engine']
             base, _ = os.path.splitext(title)
@@ -719,10 +667,7 @@ def download_audio(app_instance, job_data):
         file_info = {'path': None}
 
         def progress_hook(d):
-            if d['status'] == 'finished':
-                # Evita di acquisire path non ancora post-processate estraendo dal d originale
-                pass
-            elif d['status'] == 'downloading':
+            if d['status'] == 'downloading':
                 total = d.get('total_bytes') or d.get('total_bytes_estimate')
                 downloaded = d.get('downloaded_bytes', 0)
                 progress = downloaded / total if total else 0
@@ -764,13 +709,12 @@ def download_audio(app_instance, job_data):
         app_instance.trigger_ui_update("Download completed!", "", 1.0, 'normal')
         total_duration = info.get('duration', 0)
         
-        # Recupero file certo tramite la simulazione ydl interna (se postprocessors attivi, è opus garantito)
         final_file_path = f"{percorso}/{clean_title}.opus"
 
         if job_data['encode']: final_file_path = encode_audio(final_file_path, job_data, app_instance, total_duration)
         if job_data['play']: auto_play(final_file_path)
 
-        # --- SEZIONE TRASCRIZIONE ---
+        # --- Transcription Section ---
         if job_data['transcribe']:
             engine = job_data['engine']
             base, _ = os.path.splitext(final_file_path)
@@ -919,8 +863,7 @@ def extract_audio_for_transcription(video_path, ffmpeg_exe, app_instance=None, t
             run_ffmpeg_with_progress(command, app_instance, total_duration_sec, "Estrazione Traccia Audio...")
             if not os.path.exists(audio_output_path): return None
         return audio_output_path
-    except Exception as e:
-        print(f"Error extracting audio: {e}")
+    except Exception:
         return None
     
 def get_mime_type(file_path):
